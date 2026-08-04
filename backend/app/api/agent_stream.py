@@ -114,6 +114,7 @@ async def _compress_and_save(
             last_answer=last_answer,
             pending_question=pending_question,
         )
+        # D2: 原子更新 conversation_summary + context_hash (aupdate_context_snapshot 内置 context_hash 预计算)
         await conv_svc.aupdate_context_snapshot(cid, {
             "conversation_summary": result.get("summary", ""),
         })
@@ -122,7 +123,7 @@ async def _compress_and_save(
 
 
 async def _build_recent_turns(cid, conv_svc, current_turn: dict) -> list[dict]:
-    """追加当前轮，保留最近 3 轮摘要 (async — 在事件循环中直接 await)。"""
+    """追加当前轮，保留最近 4 轮原文 (M4, 阶段1 要求) — 含 slots/tokens。"""
     try:
         snapshot = await conv_svc.get_context_snapshot(cid)
     except Exception:
@@ -131,7 +132,7 @@ async def _build_recent_turns(cid, conv_svc, current_turn: dict) -> list[dict]:
     if not isinstance(turns, list):
         turns = []
     turns.append(current_turn)
-    return turns[-3:]
+    return turns[-4:]  # DialogueGovernor: 近4轮窗口
 
 
 # ============================================================
@@ -779,6 +780,26 @@ async def recommend_stream(req: StreamRequest, raw_request: Request):
         followup_constraints = {}
         context_prompt = ""
 
+        # DialogueGovernor: 前置子图统一多轮理解 (替代 FollowUp 主职责)
+        _governor_result = None
+        async def _run_governor():
+            nonlocal enriched_query, followup_constraints, context_prompt
+            try:
+                from app.services.dialogue_governor import get_dialogue_governor
+                gov = get_dialogue_governor()
+                gr = await gov.govern(req.message, conversation_id=cid, session_id=sid)
+                # 用 governor rewritten_query 替代"原query+[Follow-up]标注"(消除检索污染)
+                if gr.slots.rewritten_query:
+                    enriched_query = gr.slots.rewritten_query
+                if gr.prefill_constraints:
+                    followup_constraints = gr.prefill_constraints
+                if gr.context_prompt:
+                    context_prompt = gr.context_prompt
+                return gr
+            except Exception as e:
+                logger.warning(f"Governor failed, FollowUp fallback: {e}")
+                return None
+
         async def _run_followup():
             nonlocal enriched_query, followup_constraints
             try:
@@ -806,16 +827,28 @@ async def recommend_stream(req: StreamRequest, raw_request: Request):
             return {"enriched_query": req.message, "context_prompt": "", "avoid_tags": []}
 
         import asyncio as _asyncio
-        follow_up, hints_result = await _asyncio.gather(_run_followup(), _run_profile())
-        # 合并：FollowUp context_prompt + Profile context_prompt
-        context_prompt = (follow_up.get("context_prompt", "") + "\n" + hints_result["context_prompt"]).strip()
-        # 如果 FollowUp 改写了 query，保留改写版本；否则用 profile 增强版
-        if enriched_query == req.message:
-            enriched_query = hints_result["enriched_query"]
+        # DialogueGovernor 优先; 失败则 FollowUpEngine 兜底 (并行 profile)
+        _governor_result, hints_result = await _asyncio.gather(_run_governor(), _run_profile())
+        if _governor_result is None:
+            follow_up, _ = await _asyncio.gather(_run_followup(), _asyncio.sleep(0))
+            context_prompt = (follow_up.get("context_prompt", "") + "\n" + hints_result["context_prompt"]).strip()
+            if enriched_query == req.message:
+                enriched_query = hints_result["enriched_query"]
+        else:
+            if hints_result.get("context_prompt"):
+                context_prompt = (context_prompt + "\n" + hints_result["context_prompt"]).strip()
+            profile_avoid_tmp = hints_result.get("avoid_tags") or []
+            if profile_avoid_tmp:
+                ec = list(set((followup_constraints.get("exclude_tags") or []) + profile_avoid_tmp))
+                followup_constraints["exclude_tags"] = ec
         logger.info(f"⏱ followup+profile: {(_time.perf_counter() - _t0)*1000:.0f}ms (parallel)")
 
-        # ⭐ 对话式加购: FollowUpEngine 检测到 cart_intent → 直接加购
-        if follow_up.get("follow_up_type") == "cart_intent":
+        # ⭐ 对话式加购: FollowUpEngine 解析出加购目标 → 直接写库
+        # 用 cart_intent_product_id 判断而非 follow_up_type 标签:
+        # ordinal/last/brand/title 指代会抢先占用 follow_up_type,
+        # 但 cart_intent_product_id 在所有"指代+加购"组合场景都已正确解析,
+        # 改用 product_id 判断让"第二个加入购物车"等组合也能真正加购
+        if follow_up.get("cart_intent_product_id"):
             pid = follow_up.get("cart_intent_product_id", "")
             if pid:
                 try:
@@ -1069,7 +1102,9 @@ async def recommend_stream(req: StreamRequest, raw_request: Request):
                 # 构建 prefill (FollowUpEngine 检测到的追问约束)
                 _t_wf = _time.perf_counter()
                 profile_avoid = hints_result.get("avoid_tags") or []
-                prefill = _build_constraint_prefill(followup_constraints, profile_avoid)
+                # M3: 传入 governor 候选集 (narrow 分支小范围二次检索)
+                _cand = (_governor_result.candidate_ids if _governor_result else []) or []
+                prefill = _build_constraint_prefill(followup_constraints, profile_avoid, _cand)
                 state = await run_workflow(
                     user_query=enriched_query, image_url=req.image_url,
                     session_id=sid, user_id=uid, conversation_id=cid,
@@ -1151,10 +1186,19 @@ async def recommend_stream(req: StreamRequest, raw_request: Request):
                     pending_question = _extract_question(answer)
 
                     # 保留最近 N 轮对话摘要
+                    # M4: 每轮记录 slots + tokens (供压缩触发判断)
+                    _cur_slots = {}
+                    if hasattr(state, 'constraints') and state.constraints:
+                        _cc = state.constraints
+                        if _cc.category: _cur_slots["category"] = _cc.category
+                        if _cc.budget_max: _cur_slots["budget_max"] = _cc.budget_max
+                        if _cc.scenario: _cur_slots["scenario"] = _cc.scenario
                     recent_turns = await _build_recent_turns(cid, conv_svc, {
                         "user_query": req.message,
                         "assistant_answer": answer[:300],
                         "product_ids": product_ids,
+                        "slots": _cur_slots,
+                        "tokens": len(answer) // 2,  # 粗估 token 量(供压缩触发)
                     })
 
                     # 持久化 Router 检测到的品类，供下一轮 FollowUpEngine 继承
@@ -1235,14 +1279,16 @@ def _safe_dump(obj):
     return str(obj)
 
 
-def _build_constraint_prefill(constraints: dict, avoid_tags: list | None = None):
-    """将 FollowUpEngine 的 constraints dict + profile avoid_tags 转为 WorkflowState prefill"""
-    if not constraints and not avoid_tags:
+def _build_constraint_prefill(constraints: dict, avoid_tags: list | None = None,
+                             candidate_ids: list[str] | None = None):
+    """将 FollowUpEngine/Governor 的 constraints dict + profile avoid_tags 转为 WorkflowState prefill
+    candidate_ids: DialogueGovernor narrow 候选集 (M3)。"""
+    if not constraints and not avoid_tags and not candidate_ids:
         return None
     from app.schemas.workflow import WorkflowState, Constraints, RetrievalPlan
     c = constraints or {}
     merged_avoid = list(set((c.get("exclude_tags") or []) + (avoid_tags or [])))
-    return WorkflowState(
+    state = WorkflowState(
         constraints=Constraints(
             category=c.get("category"),
             sub_category=c.get("sub_category"),
@@ -1256,3 +1302,10 @@ def _build_constraint_prefill(constraints: dict, avoid_tags: list | None = None)
             sub_category=c.get("sub_category"),
         ),
     )
+    # 传递单边预算更新信号 (max_only/min_only) 给 merge_constraints
+    if c.get("budget_intent"):
+        state.budget_intent = c["budget_intent"]
+    # M3: narrow 候选集
+    if candidate_ids:
+        state.candidate_ids = candidate_ids
+    return state

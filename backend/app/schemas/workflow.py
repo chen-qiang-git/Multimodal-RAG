@@ -51,10 +51,12 @@ class WorkflowState(BaseModel):
     intent: str = ""  # recommend / compare / risk_check / compatibility_check / alternative
     constraints: Constraints = Field(default_factory=Constraints)
     retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan)
+    budget_intent: str | None = None  # "max_only"/"min_only": 单边预算更新信号, merge_constraints 据此清对端防区间塌缩
 
     # Visual 输出
     visual_result: dict | None = None
     visual_matched_pids: list[str] = Field(default_factory=list)  # 精确匹配的商品ID，钉在推荐顶部
+    candidate_ids: list[str] = Field(default_factory=list)  # DialogueGovernor M3: narrow 候选集白名单
 
     # Retrieval 输出
     retrieved_products: list[dict] = Field(default_factory=list)

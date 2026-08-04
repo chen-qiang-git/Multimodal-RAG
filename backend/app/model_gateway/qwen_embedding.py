@@ -18,6 +18,7 @@ class QwenEmbedding:
         self._base_url = QWEN_BASE_URL.rstrip("/")
         self._model = model
         self._dimensions = dimensions
+        self.last_usage: dict = {}  # 真实 token 用量，供 gateway 透传给追踪器
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         client = _get_client()
@@ -35,4 +36,5 @@ class QwenEmbedding:
         )
         resp.raise_for_status()
         data = resp.json()
+        self.last_usage = data.get("usage", {}) or {}  # 真实 token 用量
         return [e["embedding"] for e in data["output"]["embeddings"]]

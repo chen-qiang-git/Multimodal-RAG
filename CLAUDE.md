@@ -173,7 +173,8 @@ POST   /api/voice/transcribe        → ASR 语音转文字
 POST   /api/voice/tts               → TTS 文字转语音
 POST   /api/agent/action            → Agent 受控操作（加购等）
 GET    /api/observability/traces    → LLM 调用追踪
-GET    /api/observability/stats     → 聚合统计
+GET    /api/observability/stats     → 聚合统计（次数/错误率/P50/P95/token/成本）
+GET    /api/observability/overview  → 三维度聚合（成本/性能/召回）
 POST   /api/eval/run                → 运行 Golden Query 评测
 GET    /api/eval/results            → 历史评测结果
 GET    /eval                        → Chart.js 可视化仪表盘

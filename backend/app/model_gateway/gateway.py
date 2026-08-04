@@ -69,8 +69,23 @@ class ModelGateway:
         raw = yaml.safe_load((config_path or _CONFIG_PATH).read_text(encoding="utf-8"))
         self._config = _subst_env(raw)
         self._capabilities: dict[str, dict] = self._config.get("capabilities", {})
+        self._pricing: dict[str, dict] = self._config.get("pricing", {})
 
     # ---- Trace Helper ----
+
+    def _estimate_cost(self, model: str, in_tokens: int, out_tokens: int) -> float:
+        """按 model_config.yaml 的 pricing（元 / 百万 tokens）估算单次调用成本（元）。
+
+        pricing 缺失或无 token 时返回 0（如 Mock 模式）。
+        """
+        p = self._pricing.get(model)
+        if not p or (not in_tokens and not out_tokens):
+            return 0.0
+        return round(
+            in_tokens / 1_000_000 * p.get("input", 0)
+            + out_tokens / 1_000_000 * p.get("output", 0),
+            6,
+        )
 
     async def _trace(self, name: str, capability: str, model: str,
                      system: str, prompt: str, response: str,
@@ -80,12 +95,20 @@ class ModelGateway:
         try:
             inp_tokens, out_tokens = 0, 0
             if api_usage:
-                inp_tokens = api_usage.get("input_tokens", 0)
-                out_tokens = api_usage.get("output_tokens", 0)
+                inp_tokens = (api_usage.get("input_tokens", 0)
+                              or api_usage.get("prompt_tokens", 0))
+                out_tokens = (api_usage.get("output_tokens", 0)
+                              or api_usage.get("completion_tokens", 0))
+                # embedding / reranker 通常只返回 total_tokens
+                if not inp_tokens and not out_tokens:
+                    inp_tokens = api_usage.get("total_tokens", 0)
             if not inp_tokens:
                 inp_tokens = _estimate_tokens_input(system, prompt)
             if not out_tokens and response:
                 out_tokens = _estimate_tokens_output(response)
+
+            cost_cny = 0.0 if status == "mock" else self._estimate_cost(model, inp_tokens, out_tokens)
+            meta = {"cost_cny": cost_cny} if cost_cny else {}
 
             span = LLMSpan(
                 span_id=str(uuid.uuid4())[:12],
@@ -103,6 +126,7 @@ class ModelGateway:
                 status=status,
                 error=error,
                 mock_mode=MOCK_MODE,
+                metadata=meta,
             )
             await get_collector().record(span)
         except Exception:
@@ -119,7 +143,7 @@ class ModelGateway:
         cfg = self._capabilities.get(capability, {})
         model = cfg.get("model", "qwen-plus")
         t0 = time.perf_counter()
-        status, error, response = "success", "", ""
+        status, error, response, api_usage = "success", "", "", None
         try:
             if MOCK_MODE:
                 response = MockChat().generate(prompt, system)
@@ -132,21 +156,28 @@ class ModelGateway:
                     max_tokens=cfg.get("max_tokens", 2048),
                 )
                 response = await chat.generate(prompt, system)
+                api_usage = chat.last_usage  # 真实 DashScope usage
         except Exception as e:
             status, error = "error", str(e)[:500]
         await self._trace("qwen.chat", capability, model, system, prompt, response,
-                          t0, status, error)
+                          t0, status, error, api_usage=api_usage)
         _audit_call(capability, model, system + " " + prompt, response, round((time.perf_counter() - t0) * 1000), status)
         if status == "error":
             raise RuntimeError(error)
         return response
 
     async def chat_stream(self, capability: str, prompt: str, system: str = ""):
-        """流式对话生成 — 每个 token yield"""
+        """流式对话生成 — 每个 token yield
+
+        主链路端点 (/api/recommend/stream → Response Agent) 使用的就是这里。
+        注意：消费方若提前 break，会触发 GeneratorExit，流结束后的 _trace 不会执行
+        （trace 依赖流正常迭代完毕）。这是已知限制；正常完成的流式调用都会落库。
+        """
         cfg = self._capabilities.get(capability, {})
         model = cfg.get("model", "qwen-plus")
         t0 = time.perf_counter()
         full_response = ""
+        status, error, api_usage, chat = "success", "", None, None
         try:
             if MOCK_MODE:
                 for ch in MockChat().generate(prompt, system):
@@ -162,19 +193,28 @@ class ModelGateway:
                 async for token in chat.generate_stream(prompt, system):
                     full_response += token
                     yield token
+                # 流式最后一帧的 usage 已被 QwenChat 缓存到 last_usage
+                api_usage = chat.last_usage
             status = "mock" if MOCK_MODE else "success"
         except Exception as e:
             status, error = "error", str(e)[:500]
-            _audit_call(capability, model, system + " " + prompt, "", round((time.perf_counter() - t0) * 1000), status)
+            await self._trace("qwen.chat", capability, model, system, prompt,
+                              full_response, t0, status, error,
+                              api_usage=getattr(chat, "last_usage", None))
+            _audit_call(capability, model, system + " " + prompt, full_response,
+                        round((time.perf_counter() - t0) * 1000), status)
             raise RuntimeError(error) from e
-        _audit_call(capability, model, system + " " + prompt, full_response, round((time.perf_counter() - t0) * 1000), status)
+        await self._trace("qwen.chat", capability, model, system, prompt,
+                          full_response, t0, status, error, api_usage=api_usage)
+        _audit_call(capability, model, system + " " + prompt, full_response,
+                    round((time.perf_counter() - t0) * 1000), status)
 
     async def embed(self, texts: list[str], capability: str = "text_embedding") -> list[list[float]]:
         """文本向量化 — 自动追踪"""
         cfg = self._capabilities.get(capability, {})
         model = cfg.get("model", "qwen3-embedding")
         t0 = time.perf_counter()
-        status, error, result = "success", "", []
+        status, error, result, api_usage = "success", "", [], None
         prompt_snippet = texts[0][:200] if texts else ""
         try:
             if MOCK_MODE:
@@ -187,11 +227,12 @@ class ModelGateway:
                     dimensions=cfg.get("dimensions", 1024),
                 )
                 result = await emb.embed(texts)
+                api_usage = emb.last_usage  # 真实 DashScope usage
         except Exception as e:
             status, error = "error", str(e)[:500]
         await self._trace("qwen.embed", capability, model, "", prompt_snippet,
                           f"{len(texts)} vectors, {len(result[0]) if result else 0}d",
-                          t0, status, error)
+                          t0, status, error, api_usage=api_usage)
         _audit_call(capability, model, prompt_snippet, f"{len(texts)}vecs/{len(result[0]) if result else 0}d", round((time.perf_counter() - t0) * 1000), status)
         if status == "error":
             raise RuntimeError(error)
@@ -204,7 +245,7 @@ class ModelGateway:
         cfg = self._capabilities.get(capability, {})
         model = cfg.get("model", "qwen-vl-plus")
         t0 = time.perf_counter()
-        status, error, response = "success", "", ""
+        status, error, response, api_usage = "success", "", "", None
         image_info = image_path or f"bytes:{len(image_bytes) if image_bytes else 0}"
         try:
             if MOCK_MODE:
@@ -223,10 +264,11 @@ class ModelGateway:
                     response = await vis.analyze_bytes(image_bytes, content_type, prompt, system)
                 else:
                     response = await vis.analyze(image_path or "", prompt, system)
+                api_usage = vis.last_usage  # 真实 DashScope usage
         except Exception as e:
             status, error = "error", str(e)[:500]
         await self._trace("qwen.vision", capability, model, system, prompt, response,
-                          t0, status, error)
+                          t0, status, error, api_usage=api_usage)
         _audit_call(capability, model, system + " " + prompt, response, round((time.perf_counter() - t0) * 1000), status)
         if status == "error":
             raise RuntimeError(error)
@@ -238,7 +280,7 @@ class ModelGateway:
         cfg = self._capabilities.get(capability, {})
         model = cfg.get("model", "qwen3-reranker")
         t0 = time.perf_counter()
-        status, error, result = "success", "", []
+        status, error, result, api_usage = "success", "", [], None
         prompt_snippet = f"query={query[:200]}, docs={len(documents)}"
         try:
             if MOCK_MODE:
@@ -249,10 +291,11 @@ class ModelGateway:
                 from app.model_gateway.qwen_reranker import QwenReranker
                 ranker = QwenReranker(model=model)
                 result = await ranker.rerank(query, documents, top_n or 10)
+                api_usage = ranker.last_usage  # 真实 DashScope usage
         except Exception as e:
             status, error = "error", str(e)[:500]
         await self._trace("qwen.rerank", capability, model, "", prompt_snippet,
-                          f"{len(result)} results", t0, status, error)
+                          f"{len(result)} results", t0, status, error, api_usage=api_usage)
         _audit_call(capability, model, prompt_snippet, f"{len(result)} results, top={result[0]['relevance_score']:.3f}" if result else "0 results", round((time.perf_counter() - t0) * 1000), status)
         if status == "error":
             raise RuntimeError(error)

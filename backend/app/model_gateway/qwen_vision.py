@@ -22,6 +22,7 @@ class QwenVision:
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self.last_usage: dict = {}  # 真实 token 用量，供 gateway 透传给追踪器
 
     async def analyze(self, image_path: str, prompt: str, system: str = "") -> str:
         """解析单张图片"""
@@ -76,6 +77,7 @@ class QwenVision:
         )
         resp.raise_for_status()
         data = resp.json()
+        self.last_usage = data.get("usage", {}) or {}  # 真实 token 用量
         msg = data["output"]["choices"][0]["message"]
         content = msg["content"]
         if isinstance(content, list):

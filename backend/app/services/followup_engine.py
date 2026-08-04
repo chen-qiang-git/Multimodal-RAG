@@ -45,8 +45,12 @@ _LAST_REF_PATTERN = re.compile(
 
 _BUDGET_PATTERN = re.compile(
     r"(换成|改成|换|不超过|不要超过|控制在|预算)"
-    r".{0,5}?(\d+)\s*(元|块|以内|以下|之内|内)"
+    r".{0,5}?(\d+)\s*(元|块|以内|以下|之内|内|以上)"
 )
+
+# 预算修饰词 → 单边更新意图 (决定 merge 时清哪一端, 防止区间塌缩)
+_MAX_HINTS = {"以内", "以下", "之内", "内"}   # "2000以下" → 只设上限, 放开下限
+_MIN_HINTS = {"以上"}                        # "2000以上" → 只设下限, 放开上限
 
 _CART_PATTERN = re.compile(
     r"(加入购物车|加购|加进购物车|买了|下单|结算)"
@@ -102,6 +106,7 @@ class FollowUpEngine:
 
         # ---- Memory Lite: 一次读取 context_snapshot (约束 + 产品 + 查询 + 摘要) ----
         last_product_ids = []
+        last_product_map = {}  # product_id → {title, brand}; 预初始化, 防 context_snapshot 读取失败时 UnboundLocalError
         last_query = ""
         last_answer = ""
         session_constraints = {}
@@ -181,15 +186,25 @@ class FollowUpEngine:
                 result["resolved_product_id"] = last_product_ids[0]
 
         # =========================================
-        # Pattern 3: 预算更新 "换成200以内的"
+        # Pattern 3: 预算更新 "换成200以内的" / "2000以上的"
         # =========================================
         budget_match = _BUDGET_PATTERN.search(current_query)
         if budget_match:
             budget = float(budget_match.group(2))
+            hint = budget_match.group(3)
             result["is_follow_up"] = True
             if not result["follow_up_type"]:
                 result["follow_up_type"] = "budget_update"
-            result["updated_constraints"]["budget_max"] = budget
+            if hint in _MIN_HINTS:
+                # "2000以上" → 只设下限, 显式放开上限
+                result["updated_constraints"]["budget_min"] = budget
+                result["updated_constraints"]["budget_intent"] = "min_only"
+            else:
+                # "2000以内/以下/内/元/块" → 设上限
+                result["updated_constraints"]["budget_max"] = budget
+                if hint in _MAX_HINTS:
+                    # 明确的上限表达 → 显式放开下限 (清旧 budget_min)
+                    result["updated_constraints"]["budget_intent"] = "max_only"
 
         # =========================================
         # Pattern 4: 购物车意图 "加入购物车"

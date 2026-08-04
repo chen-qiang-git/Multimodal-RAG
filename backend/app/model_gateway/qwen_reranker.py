@@ -17,6 +17,7 @@ class QwenReranker:
         self._api_key = QWEN_API_KEY
         self._base_url = QWEN_BASE_URL.rstrip("/").replace("/api/v1", "/compatible-api/v1")
         self._model = model
+        self.last_usage: dict = {}  # 真实 token 用量，供 gateway 透传给追踪器
 
     async def rerank(self, query: str, documents: list[str], top_n: int = 10) -> list[dict]:
         client = _get_client()
@@ -35,6 +36,7 @@ class QwenReranker:
         )
         resp.raise_for_status()
         data = resp.json()
+        self.last_usage = data.get("usage", {}) or {}  # 真实 token 用量
         return [
             {"index": r["index"], "document": documents[r["index"]],
              "relevance_score": r["relevance_score"]}

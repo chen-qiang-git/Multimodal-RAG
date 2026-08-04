@@ -20,6 +20,8 @@ class QwenChat:
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
+        # 最近一次调用的真实 token 用量（DashScope usage），供 gateway 透传给追踪器
+        self.last_usage: dict = {}
 
     def _build_messages(self, prompt: str, system: str = "") -> list[dict]:
         messages = []
@@ -48,6 +50,7 @@ class QwenChat:
         )
         resp.raise_for_status()
         data = resp.json()
+        self.last_usage = data.get("usage", {}) or {}  # 真实 token 用量
         return data["output"]["text"]
 
     async def generate_stream(self, prompt: str, system: str = "") -> AsyncGenerator[str, None]:
@@ -81,6 +84,9 @@ class QwenChat:
                 try:
                     chunk = json.loads(data_str)
                     text = chunk.get("output", {}).get("text", "")
+                    # 流式最后一帧携带完整 usage，缓存覆盖（之前被丢弃 → token 统计失真）
+                    if chunk.get("usage"):
+                        self.last_usage = chunk["usage"]
                     if text:
                         yield text
                 except (json.JSONDecodeError, KeyError):

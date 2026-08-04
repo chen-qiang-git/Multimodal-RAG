@@ -297,14 +297,19 @@ class SemanticRetriever:
         price_max: float | None = None,
         price_min: float | None = None,
         aggregation: str = "max_score",
+        candidate_ids: list[str] | None = None,  # DialogueGovernor M3: narrow 候选集过滤
     ) -> list[dict]:
-        """块级语义检索 → 聚合到产品级别。"""
+        """块级语义检索 → 聚合到产品级别。
+
+        candidate_ids: 候选 product_id 白名单 (narrow 分支小范围二次检索), None=不过滤。
+        """
         cache_key = make_key("chunk_search", query, str(top_k), category or "", sub_category or "",
-                             str(price_max or ""), str(price_min or ""), aggregation)
+                             str(price_max or ""), str(price_min or ""), aggregation,
+                             "|".join(candidate_ids or []))
 
         async def _do() -> list[dict]:
             return await self._chunk_search_impl(
-                query, top_k, category, sub_category, price_max, price_min, aggregation,
+                query, top_k, category, sub_category, price_max, price_min, aggregation, candidate_ids,
             )
 
         return await cached(cache_key, REDIS_CACHE_TTL_SEARCH, _do)
@@ -318,6 +323,7 @@ class SemanticRetriever:
         price_max: float | None,
         price_min: float | None,
         aggregation: str,
+        candidate_ids: list[str] | None = None,
     ) -> list[dict]:
         # 1. Embed query
         try:
@@ -336,7 +342,7 @@ class SemanticRetriever:
             return await self._search_impl(query, top_k, category, sub_category, price_max, price_min)
 
         # 4. 约束过滤 (基于块的 payload)
-        chunk_hits = self._apply_chunk_filters(chunk_hits, category, sub_category, price_max, price_min)
+        chunk_hits = self._apply_chunk_filters(chunk_hits, category, sub_category, price_max, price_min, candidate_ids)
 
         # 4b. 约束过滤后无结果 → 降级产品级搜索
         if not chunk_hits:
@@ -480,9 +486,14 @@ class SemanticRetriever:
         sub_category: str | None,
         price_max: float | None,
         price_min: float | None,
+        candidate_ids: list[str] | None = None,
     ) -> list[dict]:
+        # M3: narrow 候选集白名单过滤 (仅保留候选 product_id 的块)
+        cand_set = set(candidate_ids) if candidate_ids else None
         filtered = []
         for ch in chunks:
+            if cand_set is not None and ch.get("product_id") not in cand_set:
+                continue
             if category and ch.get("category") != category:
                 continue
             if sub_category and ch.get("sub_category") != sub_category:

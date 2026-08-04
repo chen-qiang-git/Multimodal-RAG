@@ -166,6 +166,7 @@ class RetrievalAgent(BaseAgent):
         # 优先使用块级检索（语义匹配更精准），自动降级到产品级
         async def _do_search(sub_cat=None):
             try:
+                # M3: narrow 分支透传 candidate_ids (DialogueGovernor 候选集白名单)
                 return await self._text_retriever.search_chunked(
                     query=search_query,
                     top_k=state.retrieval_plan.top_k,
@@ -173,6 +174,7 @@ class RetrievalAgent(BaseAgent):
                     sub_category=sub_cat,
                     price_max=constraints.budget_max,
                     price_min=constraints.budget_min,
+                    candidate_ids=getattr(state, "candidate_ids", None) or None,
                 )
             except Exception:
                 return await self._text_retriever.search(

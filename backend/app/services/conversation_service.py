@@ -22,6 +22,28 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SESSION_TTL = 7200  # 2小时
 
+# ---- DialogueGovernor D1/D2: context_hash 预计算 + 滚动窗口 ----
+import hashlib
+import json as _json
+
+RECENT_TURNS_WINDOW = 4  # 保留近 4 轮原文 (阶段1 要求)
+
+
+def compute_context_hash(snapshot: dict) -> str:
+    """D1 强制: 写回时预计算 context_hash = sha256(recent_turns + summary + 累积约束).
+
+    请求侧直接从快照读取 context_hash 构建缓存键, 禁止实时拼接+哈希。
+    """
+    recent = snapshot.get("recent_turns", []) or []
+    summary = snapshot.get("conversation_summary", "") or ""
+    constraints = snapshot.get("constraints", {}) or {}
+    payload = _json.dumps({
+        "recent_turns": recent,
+        "conversation_summary": summary,
+        "constraints": constraints,
+    }, ensure_ascii=False, sort_keys=True, default=str)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
 
 def _utcnow():
     return datetime.now(timezone.utc)
@@ -155,13 +177,17 @@ class ConversationService:
         return dict(conv.context_snapshot) if conv and conv.context_snapshot else {}
 
     async def merge_constraints(self, conversation_id: str,
-                                new_constraints: Constraints) -> Constraints:
+                                new_constraints: Constraints,
+                                budget_intent: str | None = None) -> Constraints:
         """本轮约束合并已累积约束，返回合并后的 Constraints。
 
         规则:
         - current_turn (本轮 Router 提取) 覆盖 accumulated (累积)
         - category 变化 → 话题切换, 清空旧约束
         - budget_max=0 不是有效值, 不覆盖
+        - budget_intent: 单边预算更新 (max_only/min_only) → 显式清对端,
+          防止"从区间改成单边"时旧值残留导致区间塌缩
+          (如 累积 [2000-3000] + 本轮 "2000以下" → 清 budget_min → [_, 2000])
         - 合并结果写回 context_snapshot + 缓存
         """
         self._maybe_cleanup()
@@ -191,6 +217,12 @@ class ConversationService:
             val = cur.get(key)
             if val is not None and val > 0:
                 merged_acc[key] = val
+        # 单边预算更新: 显式放开对端, 防止旧值残留导致区间塌缩
+        # 例: 累积 [2000-3000] + 本轮 "2000以下"(max_only) → 清 budget_min → [_, 2000]
+        if budget_intent == "max_only":
+            merged_acc["budget_min"] = None
+        elif budget_intent == "min_only":
+            merged_acc["budget_max"] = None
         merged_acc["must_tags"] = list(set(cur.get("must_tags", []) + acc.get("must_tags", [])))
         merged_acc["exclude_tags"] = list(set(cur.get("exclude_tags", []) + acc.get("exclude_tags", [])))
 
@@ -253,6 +285,9 @@ class ConversationService:
         """合并更新 context_snapshot (兼容旧调用方)。"""
         snapshot = await self.get_context_snapshot(conversation_id)
         snapshot.update(snapshot_update)
+        # D1: 任一相关字段更新后立即预计算 context_hash
+        if any(k in snapshot for k in ("recent_turns", "conversation_summary", "constraints")):
+            snapshot["context_hash"] = compute_context_hash(snapshot)
         self._snapshot_cache[conversation_id] = snapshot
         await self._persist_snapshot(conversation_id, snapshot)
 
@@ -345,6 +380,8 @@ class ConversationService:
     async def _persist_snapshot(self, conversation_id: str, snapshot: dict):
         """将缓存中的 snapshot 持久化到 PG (best-effort)。"""
         try:
+            # D1 强制: 写回时同步预计算 context_hash (防遗漏)
+            snapshot["context_hash"] = compute_context_hash(snapshot)
             # 清理内部字段, 只持久化业务数据
             clean = {k: v for k, v in snapshot.items() if not k.startswith("_")}
             await self._repo.aupdate(conversation_id, context_snapshot=clean)

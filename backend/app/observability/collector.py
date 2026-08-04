@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -126,9 +127,11 @@ class TraceCollector:
         mocks = 0
         tokens_in = 0
         tokens_out = 0
+        cost_total = 0.0
         latencies = []
         by_capability: dict[str, int] = {}
         by_model: dict[str, int] = {}
+        cost_by_model: dict[str, float] = {}
 
         for fp in sorted(self._dir.glob("traces-*.json"), reverse=True):
             try:
@@ -151,9 +154,13 @@ class TraceCollector:
                 by_capability[cap] = by_capability.get(cap, 0) + 1
                 model = span.get("model", "unknown")
                 by_model[model] = by_model.get(model, 0) + 1
+                # 成本累加（model_gateway 在 metadata.cost_cny 写入单次估算成本）
+                cost = (span.get("metadata") or {}).get("cost_cny", 0) or 0
+                if cost:
+                    cost_total += cost
+                    cost_by_model[model] = round(cost_by_model.get(model, 0) + cost, 6)
 
         sorted_lat = sorted(latencies)
-        n = len(sorted_lat)
         return {
             "window_hours": hours,
             "total_calls": total,
@@ -163,11 +170,13 @@ class TraceCollector:
             "tokens_input": tokens_in,
             "tokens_output": tokens_out,
             "tokens_total": tokens_in + tokens_out,
-            "latency_avg_ms": round(sum(latencies) / max(n, 1)),
-            "latency_p50_ms": sorted_lat[n // 2] if n else 0,
-            "latency_p95_ms": sorted_lat[int(n * 0.95)] if n > 1 else (sorted_lat[0] if n else 0),
+            "estimated_cost_cny": round(cost_total, 4),
+            "latency_avg_ms": round(sum(latencies) / max(len(sorted_lat), 1)),
+            "latency_p50_ms": _percentile(sorted_lat, 50),
+            "latency_p95_ms": _percentile(sorted_lat, 95),
             "by_capability": by_capability,
             "by_model": by_model,
+            "cost_by_model": cost_by_model,
         }
 
     async def clear(self, before: str = "") -> int:
@@ -226,6 +235,15 @@ class TraceCollector:
 
 
 # ---- helpers ----
+
+def _percentile(sorted_vals: list, p: float) -> float:
+    """Nearest-rank 百分位：p∈[0,100]。空列表返回 0。"""
+    if not sorted_vals:
+        return 0
+    n = len(sorted_vals)
+    idx = min(math.ceil(p / 100 * n) - 1, n - 1)
+    return sorted_vals[max(idx, 0)]
+
 
 def _estimate_tokens_input(system: str, prompt: str) -> int:
     """粗略估算输入 token 数：中英文混合按字符数/3.5"""

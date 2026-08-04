@@ -59,10 +59,11 @@ class TextRetriever:
         price_max: float | None = None,
         price_min: float | None = None,
         aggregation: str = "max_score",
+        candidate_ids: list[str] | None = None,  # M3: narrow 候选集过滤
     ) -> list[dict]:
         """块级语义检索 + 产品聚合。"""
         return await self._semantic.search_chunked(
-            query, top_k, category, sub_category, price_max, price_min, aggregation,
+            query, top_k, category, sub_category, price_max, price_min, aggregation, candidate_ids,
         )
 
     def _search_sync(

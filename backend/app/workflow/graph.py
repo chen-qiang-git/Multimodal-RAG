@@ -63,7 +63,8 @@ async def _node_router(state: WorkflowState) -> WorkflowState:
     if state.conversation_id:
         try:
             state.constraints = await conv_svc.merge_constraints(
-                state.conversation_id, state.constraints
+                state.conversation_id, state.constraints,
+                budget_intent=getattr(state, "budget_intent", None),
             )
             await conv_svc.set_last_context(
                 state.conversation_id,
