@@ -283,7 +283,8 @@ async def recommend_stream(req: StreamRequest, raw_request: Request):
                     yield _sse("token", json.dumps({"text": ch}, ensure_ascii=False))
                     await asyncio.sleep(0.03)
                 payload = {"answer": text, "products": [], "decision_results": [],
-                           "shop_action": True, "harness_report": {}}
+                           "shop_action": True, "harness_report": {},
+                           "governor_slots": _governor_slots_json(_governor_result)}
                 if actions:
                     payload["actions"] = actions
                 yield _sse("result", json.dumps(payload, ensure_ascii=False))
@@ -1156,6 +1157,7 @@ async def recommend_stream(req: StreamRequest, raw_request: Request):
                 "alternative_products": alternatives,
                 "comparison_table": comparison,
                 "cross_category": cross_category,
+                "governor_slots": _governor_slots_json(_governor_result),
             }
             yield _sse("result", json.dumps(result, ensure_ascii=False, default=str))
             yield _sse("done", json.dumps({"finish_reason": "stop"}))
@@ -1260,6 +1262,36 @@ async def recommend_stream(req: StreamRequest, raw_request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
+
+
+def _governor_slots_json(gr):
+    """将 DialogueGovernor.GovernorResult 序列化为可读 dict (供测试页面展示槽位)。"""
+    if gr is None:
+        return None
+    try:
+        s = gr.slots
+        return {
+            "intent": s.intent,
+            "confidence": s.confidence,
+            "rewritten_query": s.rewritten_query,
+            "category": s.category,
+            "sub_category": s.sub_category,
+            "budget": {"min": s.budget.min, "max": s.budget.max, "raw": s.budget.raw, "modifier": s.budget.modifier},
+            "scene": s.scene,
+            "brand": s.brand,
+            "exclusions": list(s.exclusions),
+            "spec_keywords": list(s.spec_keywords),
+            "must_tags": list(s.must_tags),
+            "benefit": list(s.benefit),
+            "skin_type": s.skin_type,
+            "resolved_product_id": s.resolved_product_id,
+            "needs_clarification": s.needs_clarification,
+            "candidate_ids": list(gr.candidate_ids),
+            "retrieval_channels": list(gr.retrieval_channels),
+            "context_prompt": gr.context_prompt,
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _safe_dump(obj):

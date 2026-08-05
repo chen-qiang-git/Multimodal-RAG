@@ -22,6 +22,7 @@ from app.api.observability import router as observability_router
 from app.api.voice import router as voice_router
 from app.api.eval import router as eval_router
 from app.api.eval_dashboard import router as dashboard_router
+from app.api.dialogue_test import router as dialogue_test_router
 from app.api.agent_stream import router as agent_stream_router
 from app.api.conversation import router as conversation_router
 from app.api.user_profile import router as user_profile_router
@@ -38,6 +39,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 静态文件 — 测试页面等静态资源
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # 静态文件 — 上传的图片
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / DEMO_DATA_DIR / "uploads"
@@ -69,6 +75,7 @@ app.include_router(observability_router)
 app.include_router(voice_router)
 app.include_router(eval_router)
 app.include_router(dashboard_router)
+app.include_router(dialogue_test_router)
 app.include_router(agent_stream_router)
 app.include_router(conversation_router)
 app.include_router(user_profile_router)

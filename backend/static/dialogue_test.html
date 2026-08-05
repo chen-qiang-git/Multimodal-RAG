@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OmniCart 多轮对话测试台 — DialogueGovernor 槽位可视化</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1f2329; height: 100vh; overflow: hidden;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  header {
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    color: #fff; padding: 14px 24px; box-shadow: 0 2px 8px rgba(0,0,0,.08);
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .sub { font-size: 12px; opacity: .85; margin-top: 2px; }
+  .toolbar {
+    background: #fff; border-bottom: 1px solid #e5e6eb;
+    padding: 10px 24px; display: flex; gap: 12px; align-items: center; font-size: 13px;
+  }
+  .toolbar label { color: #4e5969; }
+  .toolbar input[type=text] {
+    border: 1px solid #dcdfe6; border-radius: 6px; padding: 6px 10px;
+    width: 220px; font-size: 13px; outline: none;
+  }
+  .toolbar input[type=text]:focus { border-color: #6366f1; }
+  .toolbar button {
+    border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer;
+    font-size: 13px; background: #f2f3f5; color: #4e5969; transition: all .15s;
+  }
+  .toolbar button:hover { background: #e8e9eb; }
+  .toolbar button.primary { background: #6366f1; color: #fff; }
+  .toolbar button.primary:hover { background: #5457e0; }
+  .main { flex: 1; display: flex; overflow: hidden; }
+  .chat-panel {
+    flex: 1; display: flex; flex-direction: column; background: #fff;
+    border-right: 1px solid #e5e6eb;
+  }
+  .messages {
+    flex: 1; overflow-y: auto; padding: 20px 24px; display: flex;
+    flex-direction: column; gap: 16px;
+  }
+  .msg { display: flex; gap: 10px; max-width: 80%; }
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; color: #fff;
+  }
+  .msg.user .avatar { background: #6366f1; }
+  .msg.bot .avatar { background: #8b5cf6; }
+  .bubble {
+    padding: 10px 14px; border-radius: 12px; font-size: 14px;
+    line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user .bubble { background: #6366f1; color: #fff; }
+  .msg.bot .bubble { background: #f2f3f5; color: #1f2329; }
+  .bubble .products { margin-top: 8px; border-top: 1px solid rgba(0,0,0,.08); padding-top: 8px; font-size: 12px; }
+  .typing { display: inline-block; animation: blink 1s infinite; }
+  @keyframes blink { 0%,50%{opacity:1} 51%,100%{opacity:0} }
+  .input-area {
+    border-top: 1px solid #e5e6eb; padding: 12px 24px;
+    display: flex; gap: 10px; background: #fff;
+  }
+  .input-area textarea {
+    flex: 1; border: 1px solid #dcdfe6; border-radius: 8px; padding: 10px 12px;
+    font-size: 14px; resize: none; outline: none; font-family: inherit;
+    height: 44px; max-height: 120px;
+  }
+  .input-area textarea:focus { border-color: #6366f1; }
+  .input-area button {
+    border: none; border-radius: 8px; padding: 0 20px; cursor: pointer;
+    background: #6366f1; color: #fff; font-size: 14px; font-weight: 500;
+  }
+  .input-area button:disabled { background: #c9cdd4; cursor: not-allowed; }
+  .slots-panel {
+    width: 420px; background: #fafbfc; display: flex; flex-direction: column;
+  }
+  .slots-header {
+    padding: 12px 18px; border-bottom: 1px solid #e5e6eb; background: #fff;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .slots-header h2 { font-size: 14px; font-weight: 600; color: #1f2329; }
+  .slots-header .hint { font-size: 11px; color: #86909c; }
+  .slots-list {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex;
+    flex-direction: column; gap: 12px;
+  }
+  .slot-card {
+    background: #fff; border: 1px solid #e5e6eb; border-radius: 8px;
+    padding: 12px 14px; font-size: 12px;
+  }
+  .slot-card .turn-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed #e5e6eb;
+  }
+  .slot-card .turn-head .idx { font-weight: 600; color: #6366f1; font-size: 13px; }
+  .slot-card .turn-head .intent-badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    background: #eef0f4; color: #4e5969;
+  }
+  .slot-card .query-row { margin-bottom: 8px; }
+  .slot-card .query-row .lbl { color: #86909c; font-size: 11px; }
+  .slot-card .query-row .rw {
+    background: #f0f5ff; padding: 4px 8px; border-radius: 4px;
+    color: #1f2329; word-break: break-all; margin-top: 2px;
+  }
+  .slot-card pre {
+    background: #1e1e2e; color: #cdd6f4; padding: 10px; border-radius: 6px;
+    font-size: 11px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap;
+    word-break: break-all; max-height: 280px; overflow-y: auto;
+  }
+  .empty { text-align: center; color: #c9cdd4; padding: 40px 0; font-size: 13px; }
+.slot-card .annotate {
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed #e5e6eb;
+}
+.slot-card .annotate .lbl2 { font-size: 11px; color: #86909c; margin-bottom: 4px; }
+.slot-card .annotate textarea {
+  width: 100%; border: 1px solid #ffd591; border-radius: 6px; padding: 6px 8px;
+  font-size: 12px; resize: vertical; outline: none; font-family: inherit;
+  height: 44px; max-height: 120px; background: #fffbe6;
+}
+.slot-card .annotate textarea:focus { border-color: #fa8c16; background: #fff; }
+.slot-card .annotate.has-note textarea { background: #fff1d6; border-color: #fa8c16; }
+.export-bar {
+  padding: 10px 18px; border-top: 1px solid #e5e6eb; background: #fff;
+  display: flex; gap: 8px; align-items: center;
+}
+.export-bar button {
+  border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  font-size: 12px; background: #f2f3f5; color: #4e5969;
+}
+.export-bar button.primary { background: #fa8c16; color: #fff; }
+.export-bar .count { font-size: 11px; color: #86909c; margin-left: auto; }
+  .intent-narrow { background: #fff7e6; color: #d97706; }
+  .intent-search { background: #e6f4ff; color: #096dd9; }
+  .intent-direct_answer { background: #f6ffed; color: #389e0d; }
+  .intent-shop_action { background: #fff0f6; color: #c41d7f; }
+  .intent-chitchat { background: #f0f0f0; color: #666; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>🛒 OmniCart 多轮对话测试台</h1>
+    <div class="sub">DialogueGovernor query 改写 / 指代消解 / 意图路由 — 槽位实时可视化</div>
+  </header>
+  <div class="toolbar">
+    <label>后端地址</label>
+    <input type="text" id="baseUrl" value="" placeholder="留空=当前域 (http://localhost:8006)">
+    <label>会话ID</label>
+    <input type="text" id="sessionId" value="">
+    <label>对话ID</label>
+    <input type="text" id="convId" value="">
+    <button onclick="newConversation()">🆕 新对话</button>
+    <button class="primary" onclick="clearAll()">🗑 清空</button>
+    <label style="margin-left:auto"><input type="checkbox" id="fastMode"> 快速模式</label>
+  </div>
+  <div class="main">
+    <div class="chat-panel">
+      <div class="messages" id="messages">
+        <div class="empty" id="emptyHint">开始和豆仔对话吧～试试"推荐100以内的控油洗面奶"，然后追问"便宜一点"或"第二个怎么样"</div>
+      </div>
+      <div class="input-area">
+        <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行" onkeydown="onKey(event)"></textarea>
+        <button id="sendBtn" onclick="send()">发送</button>
+      </div>
+    </div>
+    <div class="slots-panel">
+      <div class="slots-header">
+        <h2>🔍 DialogueGovernor 槽位</h2>
+        <span class="hint">query 改写后的结构化结果</span>
+      </div>
+      <div class="slots-list" id="slotsList">
+        <div class="empty">每次对话后，此处展示该轮 Governor 解析出的槽位（未进入检索/回答前）</div>
+      </div>
+      <div class="export-bar">
+        <button class="primary" onclick="exportAnnotations()">📋 导出批注历史</button>
+        <button onclick="copyAnnotations()">📋 复制到剪贴板</button>
+        <span class="count" id="noteCount">0 条批注</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+let sending = false;
+let turnCounter = 0;
+
+function $(id) { return document.getElementById(id); }
+
+function newConversation() {
+  $('convId').value = '';
+  $('sessionId').value = '';
+  clearAll();
+}
+
+function clearAll() {
+  $('messages').innerHTML = '<div class="empty" id="emptyHint">开始和豆仔对话吧～试试"推荐100以内的控油洗面奶"，然后追问"便宜一点"或"第二个怎么样"</div>';
+  $('slotsList').innerHTML = '<div class="empty">每次对话后，此处展示该轮 Governor 解析出的槽位（未进入检索/回答前）</div>';
+  turnCounter = 0;
+  history = [];
+  updateNoteCount();
+}
+
+function onKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+}
+
+function getBase() {
+  let v = $('baseUrl').value.trim();
+  if (!v) return location.origin;
+  return v.replace(/\/$/, '');
+}
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function addUserMsg(text) {
+  let empty = $('emptyHint'); if (empty) empty.remove();
+  let el = document.createElement('div');
+  el.className = 'msg user';
+  el.innerHTML = `<div class="avatar">我</div><div class="bubble">${escapeHtml(text)}</div>`;
+  $('messages').appendChild(el);
+  scrollMessages();
+}
+
+function addBotMsg(text, products) {
+  let el = document.createElement('div');
+  el.className = 'msg bot';
+  let html = `<div class="avatar">豆</div><div class="bubble" id="curBotBubble"><span class="typing">▌</span></div>`;
+  el.innerHTML = html;
+  $('messages').appendChild(el);
+  scrollMessages();
+  // 打字机逐字输出
+  let i = 0;
+  let bubble = $('curBotBubble');
+  bubble.removeAttribute('id');
+  let timer = setInterval(() => {
+    if (i < text.length) { bubble.textContent = text.slice(0, i+1) + '▌'; i++; }
+    else { clearInterval(timer); bubble.textContent = text;
+      if (products && products.length) {
+        let pHtml = products.slice(0,3).map(p => `• ${escapeHtml(p.brand||'')} ${escapeHtml(p.title||'')} ¥${p.price||0}`).join('<br>');
+        bubble.innerHTML += `<div class="products">${pHtml}</div>`;
+      }
+    }
+    scrollMessages();
+  }, 18);
+}
+
+function scrollMessages() {
+  let m = $('messages');
+  m.scrollTop = m.scrollHeight;
+}
+
+// 对话+槽位+批注 的完整历史 (供导出喂 AI)
+let history = [];   // {turn, user, bot, slots, note}
+
+function addSlotCard(slots, userMsg, botMsg) {
+  if (!slots) return;
+  turnCounter++;
+  let empty = $('slotsList').querySelector('.empty');
+  if (empty) empty.remove();
+  let intent = slots.intent || 'search';
+  let card = document.createElement('div');
+  card.className = 'slot-card';
+  card.innerHTML = `
+    <div class="turn-head">
+      <span class="idx">第 ${turnCounter} 轮</span>
+      <span class="intent-badge intent-${intent}">${escapeHtml(intent)}</span>
+    </div>
+    <div class="query-row">
+      <div class="lbl">改写后 query</div>
+      <div class="rw">${escapeHtml(slots.rewritten_query || '(空)')}</div>
+    </div>
+    <pre>${escapeHtml(JSON.stringify(slots, null, 2))}</pre>
+    <div class="annotate">
+      <div class="lbl2">📝 我的批注 (重点批槽位问题)</div>
+      <textarea placeholder="例如: budget.modifier=cheaper 但算成了 90 而非 80; intent 应为 narrow 却判成 search..." oninput="onNoteInput(this, ${turnCounter})"></textarea>
+    </div>
+  `;
+  $('slotsList').appendChild(card);
+  $('slotsList').scrollTop = $('slotsList').scrollHeight;
+  // 记录到历史 (note 初始空)
+  history.push({turn: turnCounter, user: userMsg || '', bot: botMsg || '', slots: slots, note: ''});
+}
+
+function onNoteInput(ta, turn) {
+  let entry = history.find(h => h.turn === turn);
+  if (entry) entry.note = ta.value;
+  let wrap = ta.parentElement;
+  if (ta.value.trim()) wrap.classList.add('has-note'); else wrap.classList.remove('has-note');
+  updateNoteCount();
+}
+
+function updateNoteCount() {
+  let n = history.filter(h => h.note && h.note.trim()).length;
+  $('noteCount').textContent = n + ' 条批注';
+}
+
+function buildAnnotationText() {
+  let lines = [];
+  lines.push('# OmniCart 多轮对话测试批注记录');
+  lines.push('# 目标: 帮助 AI 定位 DialogueGovernor 槽位解析问题');
+  lines.push('# 字段说明: user=用户原话, rewritten=governor改写query, slots=解析槽位, note=人工批注');
+  lines.push('');
+  for (let h of history) {
+    lines.push('===== 第 ' + h.turn + ' 轮 =====');
+    lines.push('[用户输入] ' + h.user);
+    lines.push('[豆仔回复] ' + h.bot);
+    lines.push('[改写query] ' + (h.slots.rewritten_query || ''));
+    lines.push('[意图] ' + (h.slots.intent || '') + '  [置信度] ' + (h.slots.confidence != null ? h.slots.confidence : ''));
+    if (h.slots.resolved_product_id) lines.push('[锁定商品] ' + h.slots.resolved_product_id);
+    let b = h.slots.budget || {};
+    if (b.max != null || b.min != null || b.modifier) {
+      lines.push('[预算] min=' + b.min + ' max=' + b.max + ' modifier=' + b.modifier + ' raw=' + (b.raw||''));
+    }
+    if (h.slots.category) lines.push('[品类] ' + h.slots.category + (h.slots.sub_category ? ' / ' + h.slots.sub_category : ''));
+    if (h.slots.brand) lines.push('[品牌] ' + h.slots.brand);
+    if (h.slots.exclusions && h.slots.exclusions.length) lines.push('[排除] ' + h.slots.exclusions.join(','));
+    if (h.slots.candidate_ids && h.slots.candidate_ids.length) lines.push('[候选集] ' + h.slots.candidate_ids.join(','));
+    if (h.slots.needs_clarification) lines.push('[需澄清] true');
+    lines.push('[完整槽位JSON] ' + JSON.stringify(h.slots));
+    lines.push('[我的批注] ' + (h.note && h.note.trim() ? h.note.trim() : '(无)'));
+    lines.push('');
+  }
+  lines.push('===== 结束 =====');
+  lines.push('');
+  lines.push('请根据以上批注，逐轮分析 DialogueGovernor 在 query改写/指代消解/意图路由/预算算术 上是否存在问题，给出具体修复建议。');
+  return lines.join('\n');
+}
+
+function exportAnnotations() {
+  let txt = buildAnnotationText();
+  let blob = new Blob([txt], {type: 'text/plain;charset=utf-8'});
+  let a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  let ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+  a.download = 'omnicart_annotations_' + ts + '.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function copyAnnotations() {
+  let txt = buildAnnotationText();
+  try {
+    await navigator.clipboard.writeText(txt);
+    let btn = event.target;
+    let old = btn.textContent;
+    btn.textContent = '✅ 已复制';
+    setTimeout(() => btn.textContent = old, 1500);
+  } catch(e) {
+    // 降级: 弹出文本框
+    let ta = document.createElement('textarea');
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    alert('已复制到剪贴板');
+  }
+}
+async function send() {
+  if (sending) return;
+  let input = $('input').value.trim();
+  if (!input) return;
+  sending = true;
+  $('sendBtn').disabled = true;
+  addUserMsg(input);
+  $('input').value = '';
+
+  let base = getBase();
+  let sid = $('sessionId').value.trim() || ('web-' + Math.random().toString(36).slice(2,8));
+  let cid = $('convId').value.trim();
+  let fast = $('fastMode').checked;
+
+  let body = { session_id: sid, conversation_id: cid, message: input, fast_mode: fast };
+  // 用 fetch + ReadableStream 解析 SSE
+  try {
+    let resp = await fetch(base + '/api/recommend/stream', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+
+    let reader = resp.body.getReader();
+    let decoder = new TextDecoder();
+    let buffer = '';
+    let fullAnswer = '';
+    let products = [];
+    let slots = null;
+    let cidReturned = '';
+
+    while (true) {
+      let { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let lines = buffer.split('\n');
+      buffer = lines.pop();
+      let evt = '', data = '';
+      for (let line of lines) {
+        if (line.startsWith('event: ')) evt = line.slice(7).trim();
+        else if (line.startsWith('data: ')) data = line.slice(6);
+        else if (line === '' && evt && data) {
+          try {
+            let obj = JSON.parse(data);
+            if (evt === 'token') { fullAnswer += obj.text || ''; }
+            else if (evt === 'result') {
+              fullAnswer = obj.answer || fullAnswer;
+              products = obj.products || [];
+              slots = obj.governor_slots || null;
+              cidReturned = obj.conversation_id || '';
+            }
+          } catch(e) {}
+          evt = ''; data = '';
+        }
+      }
+    }
+    // 流结束后渲染
+    addBotMsg(fullAnswer || '(无回复)', products);
+    if (slots) addSlotCard(slots, input, fullAnswer);
+    if (cidReturned) $('convId').value = cidReturned;
+  } catch(e) {
+    addBotMsg('❌ 请求失败: ' + e.message + '\n\n请确认后端已启动 (端口 8006) 且 OMNICART_MOCK_MODE=true');
+  } finally {
+    sending = false;
+    $('sendBtn').disabled = false;
+    $('input').focus();
+  }
+}
+
+// 页面加载时自动填一个示例
+window.addEventListener('load', () => {
+  $('sessionId').value = 'web-' + Math.random().toString(36).slice(2,8);
+});
+</script>
+</body>
+</html>
